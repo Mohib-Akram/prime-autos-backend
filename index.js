@@ -628,6 +628,44 @@ app.get('/reports/expenses', async (req, res) => {
 
 // Admin: kisi investor ke liye login account banana
 // Investor apna invested paisa wapas leta hai (partial withdrawal)
+// Existing investor ke account mein aur paisa add karna
+app.post('/investors/:id/deposit', async (req, res) => {
+  const { id } = req.params;
+  const { amount } = req.body;
+
+  if (!amount || amount <= 0) {
+    return res.status(400).json({ error: 'Amount zaroori hai' });
+  }
+
+  const { data: investor, error: investorError } = await supabase
+    .from('investors')
+    .select('*')
+    .eq('id', id)
+    .single();
+
+  if (investorError || !investor) {
+    return res.status(404).json({ error: 'Investor nahi mila' });
+  }
+
+  const newCashInHand = Number(investor.cash_in_hand) + Number(amount);
+  const newTotalInvested = Number(investor.total_invested) + Number(amount);
+
+  const { error: updateError } = await supabase
+    .from('investors')
+    .update({ cash_in_hand: newCashInHand, total_invested: newTotalInvested })
+    .eq('id', id);
+
+  if (updateError) {
+    return res.status(500).json({ error: updateError.message });
+  }
+
+  await supabase
+    .from('investor_deposits')
+    .insert({ investor_id: id, amount });
+
+  res.status(201).json({ message: `${investor.name} ke account mein Rs ${amount} add ho gaya` });
+});
+
 app.post('/investors/:id/withdraw', async (req, res) => {
   const { id } = req.params;
   const { amount } = req.body;
