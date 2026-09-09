@@ -279,10 +279,17 @@ app.post('/supplier-payments', async (req, res) => {
 // Bike sell karna
 app.post('/bikes/:id/sell', async (req, res) => {
   const { id } = req.params;
-  const { sale_price } = req.body;
+  const { sale_price, amount_received, buyer_name } = req.body;
 
   if (!sale_price) {
     return res.status(400).json({ error: 'sale_price zaroori hai' });
+  }
+
+  // Agar amount_received nahi diya, to maan lo poora sale_price abhi mil gaya
+  const actuallyReceived = amount_received !== undefined ? Number(amount_received) : Number(sale_price);
+
+  if (actuallyReceived > Number(sale_price)) {
+    return res.status(400).json({ error: 'Received amount sale price se zyada nahi ho sakta' });
   }
 
   const { data: bike, error: bikeError } = await supabase
@@ -396,7 +403,136 @@ app.post('/bikes/:id/sell', async (req, res) => {
       });
   }
 
-  res.status(201).json({ ...saleRecord, udhaar_reminder: Object.values(udhaarBySupplier) });
+  // Agar customer ne poora paisa nahi diya, baaki amount ko receivable ki tarah record karo
+  const pendingFromCustomer = Number(sale_price) - actuallyReceived;
+  if (pendingFromCustomer > 0) {
+    await supabase
+      .from('customer_receivables')
+      .insert({
+        bike_id: id,
+        buyer_name: buyer_name || null,
+        amount: pendingFromCustomer,
+        received_amount: 0,
+        received: false
+      });
+  }
+
+  res.status(201).json({
+    ...saleRecord,
+    udhaar_reminder: Object.values(udhaarBySupplier),
+    customer_pending: pendingFromCustomer > 0 ? pendingFromCustomer : 0
+  });
+});
+
+// Sab customer receivables ki list (bike sale ka baaki paisa)
+app.get('/customer-receivables', async (req, res) => {
+  const { data, error } = await supabase
+    .from('customer_receivables')
+    .select('*, bikes(name)')
+    .order('created_at', { ascending: false });
+
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
+
+// Customer se baaki paisa mil gaya (partial ya poora)
+app.post('/customer-receivables/:id/receive', async (req, res) => {
+  const { id } = req.params;
+  const { amount } = req.body;
+
+  if (!amount || amount <= 0) {
+    return res.status(400).json({ error: 'Amount zaroori hai' });
+  }
+
+  const { data: receivable, error: receivableError } = await supabase
+    .from('customer_receivables')
+    .select('*')
+    .eq('id', id)
+    .single();
+
+  if (receivableError || !receivable) {
+    return res.status(404).json({ error: 'Receivable nahi mila' });
+  }
+
+  const remaining = Number(receivable.amount) - Number(receivable.received_amount);
+
+  if (Number(amount) > remaining) {
+    return res.status(400).json({ error: `Sirf Rs ${remaining} baaki hai, itna zyada mat lo` });
+  }
+
+  const newReceivedAmount = Number(receivable.received_amount) + Number(amount);
+  const isFullyReceived = newReceivedAmount >= Number(receivable.amount);
+
+  await supabase
+    .from('customer_receivables')
+    .update({ received_amount: newReceivedAmount, received: isFullyReceived })
+    .eq('id', id);
+
+  res.json({ message: isFullyReceived ? 'Poora mil gaya' : `Rs ${amount} mil gaya, Rs ${receivable.amount - newReceivedAmount} baaki hai` });
+});
+
+// Naya general loan dena (bike se related nahi)
+app.post('/loans', async (req, res) => {
+  const { borrower_name, amount, notes } = req.body;
+
+  if (!borrower_name || !amount) {
+    return res.status(400).json({ error: 'borrower_name aur amount zaroori hain' });
+  }
+
+  const { data, error } = await supabase
+    .from('general_loans')
+    .insert({ borrower_name, amount, notes: notes || null })
+    .select()
+    .single();
+
+  if (error) return res.status(500).json({ error: error.message });
+  res.status(201).json(data);
+});
+
+// Sab general loans ki list
+app.get('/loans', async (req, res) => {
+  const { data, error } = await supabase
+    .from('general_loans')
+    .select('*')
+    .order('date', { ascending: false });
+
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
+
+// Loan ki wapsi record karna (partial ya poora)
+app.post('/loans/:id/repay', async (req, res) => {
+  const { id } = req.params;
+  const { amount } = req.body;
+
+  if (!amount || amount <= 0) {
+    return res.status(400).json({ error: 'Amount zaroori hai' });
+  }
+
+  const { data: loan, error: loanError } = await supabase
+    .from('general_loans')
+    .select('*')
+    .eq('id', id)
+    .single();
+
+  if (loanError || !loan) {
+    return res.status(404).json({ error: 'Loan nahi mila' });
+  }
+
+  const remaining = Number(loan.amount) - Number(loan.amount_repaid);
+
+  if (Number(amount) > remaining) {
+    return res.status(400).json({ error: `Sirf Rs ${remaining} baaki hai, itna zyada mat lo` });
+  }
+
+  const newRepaid = Number(loan.amount_repaid) + Number(amount);
+
+  await supabase
+    .from('general_loans')
+    .update({ amount_repaid: newRepaid })
+    .eq('id', id);
+
+  res.json({ message: `Rs ${amount} wapis mila` });
 });
 
 // Prime Autos Wallet ka balance dekhna
